@@ -1,0 +1,9 @@
+anthropic
+openai
+yfinance
+pandas
+matplotlib
+plotly
+pdfplumber
+python-docx
+python-dotenv
