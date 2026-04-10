@@ -11,25 +11,33 @@ Mechanisms (extracted from s_full.py):
 The loop runs: Reason → Act → Observe → repeat until stop.
 """
 
+import asyncio
 import json
+import logging
 import re
 import subprocess
 import threading
 import time
-import uuid
 from pathlib import Path
 from queue import Queue
 
 from llm.llm_client import chat, MODEL
 from tools import TOOLS as DOMAIN_TOOLS, TOOL_HANDLERS as DOMAIN_HANDLERS
+from tools.bash_safe import run_safe_bash
+from security.policy import PolicyEngine
+from security.router import ToolRouter
+from security.audit import AuditLogger
+
+logger = logging.getLogger(__name__)
 
 WORKDIR = Path.cwd()
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 TOKEN_THRESHOLD = 150000
+MAX_LOOP_ITERATIONS = 50
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 1. BASE TOOLS — file I/O + bash 
+# 1. BASE TOOLS — file I/O + bash_safe (no unrestricted bash)
 # ═══════════════════════════════════════════════════════════════════════
 
 def safe_path(p: str) -> Path:
@@ -37,19 +45,6 @@ def safe_path(p: str) -> Path:
     if not path.is_relative_to(WORKDIR):
         raise ValueError(f"Path escapes workspace: {p}")
     return path
-
-
-def run_bash(command: str) -> str:
-    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
-    if any(d in command for d in dangerous):
-        return "Error: Dangerous command blocked"
-    try:
-        r = subprocess.run(command, shell=True, cwd=WORKDIR,
-                           capture_output=True, text=True, timeout=120)
-        out = (r.stdout + r.stderr).strip()
-        return out[:50000] if out else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
 
 
 def run_read(path: str, limit: int = None) -> str:
@@ -167,32 +162,34 @@ class SkillLoader:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4. CONTEXT COMPACTION 
+# 4. CONTEXT COMPACTION
 # ═══════════════════════════════════════════════════════════════════════
 
 def estimate_tokens(messages: list) -> int:
+    """Rough token estimate. Assumes ~4 chars per token (heuristic, not exact)."""
     return len(json.dumps(messages, default=str)) // 4
 
 
 def microcompact(messages: list):
     """Clear old tool results to save context space."""
-    indices = []
+    tool_result_parts = []
     for msg in messages:
         if msg["role"] == "user" and isinstance(msg.get("content"), list):
             for part in msg["content"]:
                 if isinstance(part, dict) and part.get("type") == "tool_result":
-                    indices.append(part)
-    if len(indices) <= 3:
+                    tool_result_parts.append(part)
+    if len(tool_result_parts) <= 3:
         return
-    for part in indices[:-3]:
+    for part in tool_result_parts[:-3]:
         if isinstance(part.get("content"), str) and len(part["content"]) > 100:
             part["content"] = "[cleared]"
 
 
-def auto_compact(messages: list) -> list:
+def auto_compact(messages: list, session_id: str = None) -> list:
     """Save transcript to disk and summarize for continuity."""
     TRANSCRIPT_DIR.mkdir(exist_ok=True)
-    path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
+    tag = session_id or "local"
+    path = TRANSCRIPT_DIR / f"transcript_{tag}_{int(time.time())}.jsonl"
     with open(path, "w") as f:
         for msg in messages:
             f.write(json.dumps(msg, default=str) + "\n")
@@ -208,42 +205,44 @@ def auto_compact(messages: list) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 5. BACKGROUND MANAGER 
+# 5. BACKGROUND MANAGER
 # ═══════════════════════════════════════════════════════════════════════
 
 class BackgroundManager:
     def __init__(self):
         self.tasks = {}
         self.notifications = Queue()
+        self._lock = threading.Lock()
 
     def run(self, command: str, timeout: int = 120) -> str:
+        import uuid
         tid = str(uuid.uuid4())[:8]
-        self.tasks[tid] = {"status": "running", "command": command, "result": None}
+        with self._lock:
+            self.tasks[tid] = {"status": "running", "command": command, "result": None}
         threading.Thread(target=self._exec, args=(tid, command, timeout), daemon=True).start()
         return f"Background task {tid} started: {command[:80]}"
 
     def _exec(self, tid: str, command: str, timeout: int):
-        try:
-            r = subprocess.run(command, shell=True, cwd=WORKDIR,
-                               capture_output=True, text=True, timeout=timeout)
-            output = (r.stdout + r.stderr).strip()[:50000]
-            self.tasks[tid].update({"status": "completed", "result": output or "(no output)"})
-        except Exception as e:
-            self.tasks[tid].update({"status": "error", "result": str(e)})
+        # Route through bash_safe for security — no unrestricted shell
+        output = run_safe_bash(command)
+        status = "error" if output.startswith("Error:") else "completed"
+        with self._lock:
+            self.tasks[tid].update({"status": status, "result": output})
         self.notifications.put({
             "task_id": tid,
-            "status": self.tasks[tid]["status"],
-            "result": self.tasks[tid]["result"][:500],
+            "status": status,
+            "result": output[:500],
         })
 
     def check(self, tid: str = None) -> str:
-        if tid:
-            t = self.tasks.get(tid)
-            return f"[{t['status']}] {t.get('result') or '(running)'}" if t else f"Unknown: {tid}"
-        return "\n".join(
-            f"{k}: [{v['status']}] {v['command'][:60]}"
-            for k, v in self.tasks.items()
-        ) or "No background tasks."
+        with self._lock:
+            if tid:
+                t = self.tasks.get(tid)
+                return f"[{t['status']}] {t.get('result') or '(running)'}" if t else f"Unknown: {tid}"
+            return "\n".join(
+                f"{k}: [{v['status']}] {v['command'][:60]}"
+                for k, v in self.tasks.items()
+            ) or "No background tasks."
 
     def drain(self) -> list:
         notifs = []
@@ -253,13 +252,11 @@ class BackgroundManager:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# GLOBAL INSTANCES
+# SKILL LOADER (module-level, read-only after init)
 # ═══════════════════════════════════════════════════════════════════════
 
 SKILLS_DIR = WORKDIR / "skills"
-TODO = TodoManager()
 SKILLS = SkillLoader(SKILLS_DIR)
-BG = BackgroundManager()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -267,7 +264,7 @@ BG = BackgroundManager()
 # ═══════════════════════════════════════════════════════════════════════
 
 BASE_TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
+    {"name": "bash_safe", "description": "Run a constrained shell command (allowlisted commands only).",
      "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
     {"name": "read_file", "description": "Read file contents.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
@@ -281,7 +278,7 @@ BASE_TOOLS = [
      "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
     {"name": "compress", "description": "Manually compress conversation context.",
      "input_schema": {"type": "object", "properties": {}}},
-    {"name": "background_run", "description": "Run a shell command in a background thread.",
+    {"name": "background_run", "description": "Run a shell command in a background thread (uses bash_safe constraints).",
      "input_schema": {"type": "object", "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}}, "required": ["command"]}},
     {"name": "check_background", "description": "Check background task status.",
      "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}}},
@@ -289,26 +286,9 @@ BASE_TOOLS = [
 
 ALL_TOOLS = BASE_TOOLS + DOMAIN_TOOLS
 
-BASE_HANDLERS = {
-    "bash":             lambda **kw: run_bash(kw["command"]),
-    "read_file":        lambda **kw: run_read(kw["path"], kw.get("limit")),
-    "write_file":       lambda **kw: run_write(kw["path"], kw["content"]),
-    "edit_file":        lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-    "TodoWrite":        lambda **kw: TODO.update(kw["items"]),
-    "load_skill":       lambda **kw: SKILLS.load(kw["name"]),
-    "compress":         lambda **kw: "Compressing...",
-    "background_run":   lambda **kw: BG.run(kw["command"], kw.get("timeout", 120)),
-    "check_background": lambda **kw: BG.check(kw.get("task_id")),
-}
 
-ALL_HANDLERS = {**BASE_HANDLERS, **DOMAIN_HANDLERS}
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# SYSTEM PROMPT
-# ═══════════════════════════════════════════════════════════════════════
-
-SYSTEM = f"""You are an AI business analyst agent at {WORKDIR}.
+def _build_system_prompt() -> str:
+    return f"""You are an AI business analyst agent at {WORKDIR}.
 
 You can analyze CSV files, query databases, look up stock prices, extract text from PDF/DOCX files, and generate charts.
 Use tools to solve tasks step by step. Use TodoWrite for multi-step work to track progress.
@@ -319,38 +299,83 @@ Available skills:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# SYSTEM PROMPT (kept as module-level constant name for consumer.py import)
+# ═══════════════════════════════════════════════════════════════════════
+
+SYSTEM = _build_system_prompt()
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # REACT LOOP
 # ═══════════════════════════════════════════════════════════════════════
 
-def agent_loop(messages: list, tools: list = None, handlers: dict = None):
+async def agent_loop(messages: list, tools: list = None, handlers: dict = None, security_context: dict = None):
     """
     Core ReAct loop. Runs until the LLM stops calling tools.
 
     Args:
-        messages:  Conversation history (mutated in-place).
-        tools:     Optional tool schemas list. Defaults to ALL_TOOLS.
-        handlers:  Optional handler dict. Defaults to ALL_HANDLERS.
+        messages:          Conversation history (mutated in-place).
+        tools:             Optional tool schemas list. Defaults to ALL_TOOLS.
+        handlers:          Optional handler dict. Defaults to ALL_HANDLERS.
+        security_context:  Optional dict with mode, session_id, user_id, etc.
 
     Before each LLM call:
       - microcompact old tool results
       - auto_compact if context too large
       - drain background task notifications
     """
-    # Use provided tools/handlers or fall back to module-level globals
+    # Per-session mutable instances (not shared across sessions)
+    todo = TodoManager()
+    bg = BackgroundManager()
+
+    # Use provided tools/handlers or fall back to module-level defaults
     _tools = tools if tools is not None else ALL_TOOLS
-    _handlers = handlers if handlers is not None else ALL_HANDLERS
+
+    # Build per-session handlers with session-scoped TODO and BG
+    base_handlers = {
+        "bash_safe":        lambda **kw: run_safe_bash(kw["command"]),
+        "read_file":        lambda **kw: run_read(kw["path"], kw.get("limit")),
+        "write_file":       lambda **kw: run_write(kw["path"], kw["content"]),
+        "edit_file":        lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
+        "TodoWrite":        lambda **kw: todo.update(kw["items"]),
+        "load_skill":       lambda **kw: SKILLS.load(kw["name"]),
+        "compress":         lambda **kw: "(context will be compressed after this tool round)",
+        "background_run":   lambda **kw: bg.run(kw["command"], kw.get("timeout", 120)),
+        "check_background": lambda **kw: bg.check(kw.get("task_id")),
+    }
+
+    if handlers is not None:
+        # Caller-provided handlers (e.g., scoped DB handlers from consumer.py)
+        # merge on top of per-session base handlers
+        _handlers = {**base_handlers, **DOMAIN_HANDLERS, **handlers}
+    else:
+        _handlers = {**base_handlers, **DOMAIN_HANDLERS}
+
+    # Initialize security components
+    mode = security_context.get("mode", "cli") if security_context else "cli"
+    session_id = security_context.get("session_id") if security_context else None
+    policy = PolicyEngine(mode=mode)
+    audit = AuditLogger()
+    router = ToolRouter(_handlers, policy, audit)
+
+    # Filter tool schemas to only show allowed tools to LLM
+    allowed = set(policy.policy["allowed_tools"])
+    _tools = [t for t in _tools if t["name"] in allowed]
 
     rounds_without_todo = 0
+    iteration = 0
 
-    while True:
+    while iteration < MAX_LOOP_ITERATIONS:
+        iteration += 1
+
         # — Mechanism 4: compression pipeline —
         microcompact(messages)
         if estimate_tokens(messages) > TOKEN_THRESHOLD:
-            print("[auto-compact triggered]")
-            messages[:] = auto_compact(messages)
+            logger.info("auto-compact triggered (iteration %d)", iteration)
+            messages[:] = auto_compact(messages, session_id=session_id)
 
         # — Mechanism 5: drain background notifications —
-        notifs = BG.drain()
+        notifs = bg.drain()
         if notifs:
             txt = "\n".join(
                 f"[bg:{n['task_id']}] {n['status']}: {n['result']}" for n in notifs
@@ -360,8 +385,9 @@ def agent_loop(messages: list, tools: list = None, handlers: dict = None):
                 "content": f"<background-results>\n{txt}\n</background-results>",
             })
 
-        # — LLM call —
-        response = chat(
+        # — LLM call (blocking → run in thread to avoid blocking event loop) —
+        response = await asyncio.to_thread(
+            chat,
             messages=messages, system=SYSTEM,
             tools=_tools, max_tokens=8000,
         )
@@ -380,13 +406,13 @@ def agent_loop(messages: list, tools: list = None, handlers: dict = None):
             if block.type == "tool_use":
                 if block.name == "compress":
                     manual_compress = True
-                handler = _handlers.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}:")
-                print(str(output)[:200])
+                # All calls go through the async router
+                output = await router.execute(
+                    block.name,
+                    block.input,
+                    context=security_context,
+                )
+                logger.debug("Tool %s: %s", block.name, str(output)[:200])
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -397,13 +423,21 @@ def agent_loop(messages: list, tools: list = None, handlers: dict = None):
 
         # — Mechanism 2: todo nag reminder —
         rounds_without_todo = 0 if used_todo else rounds_without_todo + 1
-        if TODO.has_open_items() and rounds_without_todo >= 3:
+        if todo.has_open_items() and rounds_without_todo >= 3:
             results.append({"type": "text", "text": "<reminder>Update your todos.</reminder>"})
 
         messages.append({"role": "user", "content": results})
 
         # — Mechanism 4: manual compress —
         if manual_compress:
-            print("[manual compact]")
-            messages[:] = auto_compact(messages)
+            logger.info("manual compact triggered")
+            messages[:] = auto_compact(messages, session_id=session_id)
             return
+
+    # If we exit the loop by exceeding MAX_LOOP_ITERATIONS
+    logger.warning("agent_loop hit max iterations (%d) for session %s", MAX_LOOP_ITERATIONS, session_id)
+    messages.append({
+        "role": "assistant",
+        "content": f"I've reached the maximum number of tool-use rounds ({MAX_LOOP_ITERATIONS}). "
+                   "Please start a new conversation or break your task into smaller steps.",
+    })

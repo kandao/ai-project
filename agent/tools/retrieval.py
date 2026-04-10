@@ -130,6 +130,14 @@ def hybrid_retrieval(query: str, top_k: int = 5, db_url: Optional[str] = None) -
     if not rows:
         return "No results found."
 
+    # Agent04: scan retrieved chunks for injection before returning to LLM
+    from security.scanner import sanitize_rag_chunks
+    contents = [row["content"] for row in rows]
+    safe_contents = sanitize_rag_chunks(contents)
+    # Replace row contents with sanitized versions
+    for i, row in enumerate(rows):
+        row["content"] = safe_contents[i]
+
     parts = []
     for i, row in enumerate(rows, 1):
         meta = row.get("metadata") or {}

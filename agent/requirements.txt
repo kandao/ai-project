@@ -13,3 +13,4 @@ psycopg2-binary
 pgvector
 voyageai
 requests
+aiofiles>=23.0

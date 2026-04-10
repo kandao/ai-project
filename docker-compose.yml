@@ -121,9 +121,14 @@ services:
         condition: service_healthy
     environment:
       LLM_PROVIDER: anthropic
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql://docqa:docqa@postgres/docqa
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-voyage}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-voyage-3}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:-}
+      BACKEND_INTERNAL_URL: http://backend:8000
 
 volumes:
   postgres-data:

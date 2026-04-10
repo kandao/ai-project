@@ -23,6 +23,7 @@ Env vars:
     BACKEND_INTERNAL_URL     internal backend URL for token exchange
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -31,6 +32,8 @@ import sys
 
 from auth import AuthError, build_db_url, exchange_token
 from loop import SYSTEM, agent_loop
+from security.scanner import scan_user_message
+from security.audit import AuditLogger
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -106,13 +109,24 @@ def process_message(payload: dict, r) -> None:
     Process a single Kafka message payload end-to-end.
 
     1. Extract token, session_id, message text
-    2. Exchange token for scoped DB credentials
-    3. Run agent_loop (tool rounds use blocking chat())
-    4. Stream final response text to Redis in chunks
+    2. Scan user message for injection attempts
+    3. Exchange token for scoped DB credentials
+    4. Run agent_loop (tool rounds use blocking chat())
+    5. Stream final response text to Redis in chunks
     """
     session_id = payload.get("session_id", "unknown")
     channel = f"session:{session_id}"
     message_text = payload.get("message", "")
+    audit = AuditLogger()
+
+    # — Agent04: Scan user message for injection —
+    injection_matches = scan_user_message(message_text)
+    if injection_matches:
+        asyncio.run(
+            audit.log_injection("user_message", injection_matches, {"session_id": session_id})
+        )
+        # Don't block — but disable dangerous tools for this session
+        # The policy engine in kafka mode already blocks bash/write
 
     # — Auth: exchange token for scoped DB credentials —
     token = payload.get("token")
@@ -135,9 +149,19 @@ def process_message(payload: dict, r) -> None:
     # — Build initial message history —
     messages = [{"role": "user", "content": message_text}]
 
+    # — Agent04: Build security context for this session —
+    security_context = {
+        "mode": "kafka",
+        "session_id": session_id,
+        "user_id": payload.get("user_id"),
+        "injection_detected": bool(injection_matches),
+    }
+
     # — Run ReAct loop (tool-use rounds use blocking chat, final response included) —
     try:
-        agent_loop(messages, tools=tools, handlers=handlers)
+        asyncio.run(
+            agent_loop(messages, tools=tools, handlers=handlers, security_context=security_context)
+        )
     except Exception as e:
         logger.exception("agent_loop error for session %s", session_id)
         _publish(r, channel, f"error:Agent error: {e}")

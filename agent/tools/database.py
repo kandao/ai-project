@@ -4,11 +4,37 @@ database.py — SQL query tool.
 Supports two backends:
   - PostgreSQL: when db_url is provided (or DATABASE_URL env var is set), connects via psycopg2
   - SQLite:     fallback using a local sample database
+
+Agent04 changes:
+  - Only SELECT statements allowed
+  - Write operations blocked via WRITE_PATTERNS
+  - Dangerous patterns blocked via DANGEROUS_PATTERNS
+  - Query length capped at 2000 chars
 """
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
+
+# SQL statements that are NEVER allowed via the LLM tool
+WRITE_PATTERNS = re.compile(
+    r"(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|REPLACE)\b"
+)
+
+DANGEROUS_PATTERNS = re.compile(
+    r"(?i)("
+    r"INTO\s+OUTFILE|"
+    r"LOAD_FILE|"
+    r"pg_read_file|"
+    r"pg_ls_dir|"
+    r"COPY\s+.*\s+TO|"
+    r";\s*--|"            # comment-based injection
+    r"UNION\s+SELECT|"   # UNION injection
+    r"information_schema|"
+    r"pg_catalog\.pg_shadow"
+    r")"
+)
 
 DB_PATH = Path(__file__).parent.parent / "data" / "sample.db"
 
@@ -122,14 +148,39 @@ def _query_sqlite(sql: str) -> str:
 
 def query_database(sql: str, db_url: Optional[str] = None) -> str:
     """
-    Execute a SQL query and return results as a formatted table.
+    Execute a READ-ONLY SQL query with validation.
 
     Args:
         sql:    SQL query to execute.
         db_url: Optional PostgreSQL connection URL. If provided (or DATABASE_URL is set),
                 connects to PostgreSQL. Otherwise uses the local SQLite sample database.
+
+    Agent04 changes:
+      - Only SELECT statements allowed
+      - Write operations blocked
+      - Dangerous patterns blocked
+      - Query length capped at 2000 chars
     """
     import os
+
+    sql = sql.strip()
+
+    # Length limit
+    if len(sql) > 2000:
+        return "Error: Query too long (max 2000 chars)"
+
+    # Must start with SELECT
+    if not sql.upper().startswith("SELECT"):
+        return "Error: Only SELECT queries are allowed"
+
+    # Block write operations
+    if WRITE_PATTERNS.search(sql):
+        return "Error: Write operations are not permitted"
+
+    # Block dangerous patterns
+    if DANGEROUS_PATTERNS.search(sql):
+        return "Error: Query contains disallowed patterns"
+
     resolved_url = db_url or os.getenv("DATABASE_URL")
     if resolved_url:
         return _query_postgres(sql, resolved_url)
