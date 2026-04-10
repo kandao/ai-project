@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+sqlalchemy[asyncio]
+asyncpg
+psycopg2-binary
+aiokafka
+redis[hiredis]
+PyJWT
+pydantic-settings
+python-dotenv
+boto3
+aiofiles

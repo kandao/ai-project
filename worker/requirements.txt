@@ -1,0 +1,12 @@
+kafka-python
+sqlalchemy
+asyncpg
+pgvector
+pdfplumber
+python-docx
+fugashi[unidic-lite]
+langdetect
+voyageai
+cohere
+python-dotenv
+pydantic-settings
