@@ -1,8 +1,13 @@
-# Agent PRD — DocQA tool (Enterprise Document Q&A)
+# DocQA — Enterprise Document Q&A (System Overview)
 
 ## Purpose
 
 Production-grade RAG system: upload documents, ask questions, get answers with source citations. Supports English and Japanese. LLM provider switchable via `LLM_PROVIDER` env var.
+
+This document describes the **integrated system** — how Backend, Agent, and Worker collaborate to deliver the DocQA experience. For implementation details of each service, see:
+- [PRD-Backend.md](../backend/PRD-Backend.md) — FastAPI gateway
+- [PRD-Agent01.md](../agent/PRD-Agent01.md) — ReAct agent with tools
+- [PRD-Worker.md](../worker/PRD-Worker.md) — Ingestion pipeline
 
 ---
 
@@ -16,26 +21,24 @@ Production-grade RAG system: upload documents, ask questions, get answers with s
 
 ---
 
-## File Structure
+## Service Boundaries
+
+The system is split into three independent services, communicating via Kafka and Redis:
 
 ```
-backend/
-  ├── main.py                   # FastAPI app entrypoint
-  ├── routers/
-  │   ├── documents.py          # upload, list, delete
-  │   └── chat.py               # chat, history, streaming
-  ├── services/
-  │   ├── ingestion.py          # extract → chunk → embed → store
-  │   ├── retrieval.py          # hybrid search (pgvector + BM25 + RRF)
-  │   └── conversation.py       # multi-turn memory, context window mgmt
-  ├── llm/
-  │   └── llm_client.py         # Anthropic + OpenAI abstraction
-  ├── chunking/
-  │   ├── japanese.py           # fugashi tokenizer pipeline
-  │   └── english.py            # word/sentence splitter
-  ├── models/                   # SQLAlchemy models
-  ├── requirements.txt
-  └── .env.example
+backend/   — FastAPI HTTP gateway. Publishes to Kafka, relays SSE from Redis.
+             Does NOT call the LLM or perform retrieval.
+             (see PRD-Backend.md)
+
+agent/     — ReAct loop with tools (hybrid_retrieval, get_stock_price, etc.).
+             Kafka consumer for chat.query. Streams responses to Redis.
+             Contains llm_client.py (Anthropic / OpenAI abstraction).
+             (see PRD-Agent01.md)
+
+worker/    — Stateless ETL pipeline. Kafka consumer for doc.ingest.
+             Extracts text, chunks by language, embeds, stores to pgvector.
+             Contains chunking/ (fugashi for Japanese, word split for English).
+             (see PRD-Worker.md)
 ```
 
 ---
@@ -75,13 +78,15 @@ GET    /api/analytics            # token usage, cost, latency per query
 
 ## Ingestion Pipeline
 
+Handled by the **Ingestion Worker** (separate service, not the agent or backend).
+
 ```
-File upload → FastAPI
+File upload → FastAPI (backend)
   → validate file type + size
   → store to S3 / local filesystem
   → publish to Kafka topic: doc.ingest
 
-Kafka consumer (agent worker):
+Ingestion Worker (Kafka consumer for doc.ingest):
   1. Extract text
        PDF  → pdfplumber
        DOCX → python-docx
@@ -107,28 +112,34 @@ Kafka consumer (agent worker):
 
 ## Chat Pipeline
 
-The backend does not call the LLM or perform retrieval directly. It publishes to Kafka and relays the response stream.
+The backend does not call the LLM or perform retrieval directly. It publishes to Kafka and relays the response stream. Per-user access control is enforced via one-time token exchange (see Architecture.md).
 
 ```
 POST /api/chat  { message, session_id }
-  → FastAPI publishes → Kafka: chat.query
-  → FastAPI subscribes → Redis: session:{id}  (SSE open)
+  → Backend validates JWT → extract user_id
+  → Backend generates one-time token (mapped to user's DB role)
+  → Backend publishes → Kafka: chat.query { message, session_id, token }
+  → Backend subscribes → Redis: session:{id}  (SSE open)
 
-Agent (Kafka consumer, ReAct loop):
-  → LLM reads the query and decides which tool(s) to call
-  → if document-related → calls hybrid_retrieval tool:
-        normalize query (lemmatize if Japanese)
-        pgvector cosine similarity top-k  ─┐
-        pg_search BM25 top-k              ─┤ parallel
-        merge with RRF                    ─┘
-        LLM summarizes with citations [doc_id, chunk_index]
-  → if not document-related → calls other tools (stocks, CSV, etc.)
+Agent (Kafka consumer for chat.query, ReAct loop):
+  → Exchange one-time token → POST /api/internal/token-exchange
+    → receive scoped DB credentials (Python only, never sent to LLM)
+  → Inject credentials into tool handlers
+  → LLM reads the query and decides which tool(s) to call:
+      → if document-related → calls hybrid_retrieval tool:
+            normalize query (lemmatize if Japanese)
+            pgvector cosine similarity top-k  ─┐
+            pg_search BM25 top-k              ─┤ parallel
+            merge with RRF                    ─┘
+            return ranked chunks to LLM
+      → if not document-related → calls other tools (stocks, CSV, etc.)
+  → LLM synthesizes answer with citations [doc_id, chunk_index]
   → stream response chunks → Redis: session:{id}
 
-FastAPI relays Redis stream → SSE → Client
+Backend relays Redis stream → SSE → Client
 ```
 
-The agent is not told to always retrieve — it reasons about the query first.
+The agent is not told to always retrieve — it reasons about the query first. The hybrid_retrieval tool returns raw chunks; the LLM produces the final cited answer.
 
 ---
 
@@ -188,22 +199,22 @@ k = 60  (standard default)
 
 ---
 
-## Dependencies
+## Dependencies (by service)
 
+**Backend** (FastAPI gateway):
 ```
-anthropic
-openai
-fastapi
-uvicorn
-python-multipart
-psycopg2-binary
-pgvector
-kafka-python
-redis
-pdfplumber
-python-docx
-fugashi[unidic-lite]
-langdetect
-PyJWT
-python-dotenv
+fastapi, uvicorn, python-multipart, sqlalchemy, asyncpg, psycopg2-binary
+aiokafka, redis, PyJWT, pydantic-settings, python-dotenv, boto3
+```
+
+**Agent** (ReAct loop + tools):
+```
+anthropic, openai, kafka-python, redis, psycopg2-binary, pgvector
+```
+
+**Worker** (Ingestion pipeline):
+```
+kafka-python, sqlalchemy, psycopg2-binary, pgvector
+pdfplumber, python-docx, fugashi[unidic-lite], langdetect
+voyageai, cohere, python-dotenv
 ```

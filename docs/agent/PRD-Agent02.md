@@ -63,13 +63,51 @@ agent/
 
 Publish to channel `session:{session_id}`:
 
-```
-chunk: "Based on the documents..."
-chunk: "the refund policy states..."
-[DONE]
+| Message | Meaning |
+|---|---|
+| `chunk:<text>` | One LLM text chunk — forward to SSE client immediately |
+| `error:<msg>` | Agent error — client should surface to user |
+| `[DONE]` | Stream complete — client closes the SSE connection |
+
+### Streaming Architecture
+
+The goal is minimum time-to-first-token: each chunk from the LLM is forwarded to Redis the instant it arrives, with no buffering.
+
+#### Two-phase LLM interaction
+
+| Phase | LLM call | Reason |
+|---|---|---|
+| Tool-use rounds (intermediate) | `llm_client.chat()` — blocking | User doesn't see these; simplicity over latency |
+| Final response (no more tools) | `llm_client.stream()` — token-by-token | Each chunk reaches the client immediately |
+
+The agent detects the final round when the LLM response has `stop_reason == "end_turn"` (Anthropic) or `finish_reason == "stop"` (OpenAI) with no tool calls in the response.
+
+#### Chunk dispatch loop
+
+```python
+# Final response round — stream directly to Redis
+for chunk in llm_client.stream(messages, system=SYSTEM_PROMPT):
+    redis_client.publish(f"session:{session_id}", f"chunk:{chunk}")
+redis_client.publish(f"session:{session_id}", "[DONE]")
 ```
 
-The FastAPI backend subscribes to this channel and relays via SSE to the client.
+#### Error handling
+
+```python
+try:
+    # ... agent loop ...
+except Exception as e:
+    redis_client.publish(f"session:{session_id}", f"error:{e}")
+finally:
+    redis_client.publish(f"session:{session_id}", "[DONE]")
+```
+
+#### Backend SSE relay (contract)
+
+FastAPI subscribes to `session:{session_id}` and must:
+- Forward each `chunk:<text>` as an SSE `data:` event **immediately** (no response buffering — use `StreamingResponse` with `media_type="text/event-stream"`)
+- On `error:<msg>`: forward as SSE event with `event: error`
+- On `[DONE]`: close the SSE stream
 
 ### Integration with loop.py
 
@@ -78,15 +116,7 @@ The FastAPI backend subscribes to this channel and relays via SSE to the client.
 | Mode | Input | Output |
 |---|---|---|
 | CLI | stdin | stdout (print) |
-| Kafka | Kafka message | Redis pub/sub |
-
-To support Redis streaming, `consumer.py` wraps the LLM call with a streaming variant:
-
-```python
-# Use llm_client.stream() instead of chat() for the final response
-# Intermediate tool-use rounds still use chat() (non-streaming)
-# Only the final natural-language response is streamed to Redis
-```
+| Kafka | Kafka message | Redis pub/sub — streamed token by token |
 
 ### Error Handling
 
