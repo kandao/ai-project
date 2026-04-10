@@ -10,6 +10,7 @@ from tools.stocks import get_stock_price
 from tools.database import query_database
 from tools.pdf_extractor import extract_pdf
 from tools.doc_extractor import extract_doc
+from tools.retrieval import hybrid_retrieval
 
 # ── Handler functions (all return str) ────────────────────────────────
 
@@ -71,8 +72,9 @@ def _generate_chart(data: str, chart_type: str = "bar",
 # ── Registry ──────────────────────────────────────────────────────────
 
 TOOL_HANDLERS = {
-    "get_stock_price": lambda **kw: get_stock_price(kw["symbol"]),
-    "query_database":  lambda **kw: query_database(kw["sql"]),
+    "get_stock_price":   lambda **kw: get_stock_price(kw["symbol"]),
+    "query_database":    lambda **kw: query_database(kw["sql"]),
+    "hybrid_retrieval":  lambda **kw: hybrid_retrieval(kw["query"], kw.get("top_k", 5)),
     "analyze_csv":     lambda **kw: _analyze_csv(kw["file_path"], kw.get("query", "")),
     "generate_chart":  lambda **kw: _generate_chart(
         kw["data"], kw.get("chart_type", "bar"),
@@ -150,6 +152,27 @@ TOOLS = [
                 "file_path": {"type": "string", "description": "Path to DOCX file"}
             },
             "required": ["file_path"],
+        },
+    },
+    {
+        "name": "hybrid_retrieval",
+        "description": (
+            "Search the document knowledge base using hybrid vector + keyword (BM25) retrieval "
+            "with RRF fusion. Use this to answer questions grounded in uploaded documents."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural language search query",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Number of results to return (default: 5)",
+                },
+            },
+            "required": ["query"],
         },
     },
 ]

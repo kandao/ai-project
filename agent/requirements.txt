@@ -7,3 +7,9 @@ plotly
 pdfplumber
 python-docx
 python-dotenv
+kafka-python
+redis
+psycopg2-binary
+pgvector
+voyageai
+requests

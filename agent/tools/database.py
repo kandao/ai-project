@@ -1,7 +1,14 @@
-"""SQLite database tool with auto-created sample data."""
+"""
+database.py — SQL query tool.
+
+Supports two backends:
+  - PostgreSQL: when db_url is provided (or DATABASE_URL env var is set), connects via psycopg2
+  - SQLite:     fallback using a local sample database
+"""
 
 import sqlite3
 from pathlib import Path
+from typing import Optional
 
 DB_PATH = Path(__file__).parent.parent / "data" / "sample.db"
 
@@ -54,8 +61,44 @@ def _ensure_db():
     conn.close()
 
 
-def query_database(sql: str) -> str:
-    """Execute a SQL query and return results."""
+def _format_rows(cols, rows, total: int) -> str:
+    """Format query rows into a pipe-delimited table string."""
+    lines = [" | ".join(str(c) for c in cols)]
+    lines.append("-" * len(lines[0]))
+    for row in rows[:100]:
+        lines.append(" | ".join(str(v) for v in row))
+    result = "\n".join(lines)
+    if total > 100:
+        result += f"\n... ({total} total rows, showing first 100)"
+    return result
+
+
+def _query_postgres(sql: str, db_url: str) -> str:
+    """Execute SQL against a PostgreSQL database via psycopg2."""
+    import psycopg2
+    import psycopg2.extras
+
+    try:
+        conn = psycopg2.connect(db_url)
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            if sql.strip().upper().startswith("SELECT"):
+                rows = cur.fetchall()
+                if not rows:
+                    return "No results."
+                cols = [desc[0] for desc in cur.description]
+                return _format_rows(cols, rows, len(rows))
+            else:
+                conn.commit()
+                return f"OK. Rows affected: {cur.rowcount}"
+    except Exception as e:
+        return f"SQL Error: {e}"
+    finally:
+        conn.close()
+
+
+def _query_sqlite(sql: str) -> str:
+    """Execute SQL against the local SQLite sample database."""
     _ensure_db()
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -67,14 +110,7 @@ def query_database(sql: str) -> str:
             if not rows:
                 return "No results."
             cols = rows[0].keys()
-            lines = [" | ".join(cols)]
-            lines.append("-" * len(lines[0]))
-            for row in rows[:100]:
-                lines.append(" | ".join(str(row[c]) for c in cols))
-            result = "\n".join(lines)
-            if len(rows) > 100:
-                result += f"\n... ({len(rows)} total rows, showing first 100)"
-            return result
+            return _format_rows(cols, [(row[c] for c in cols) for row in rows], len(rows))
         else:
             conn.commit()
             return f"OK. Rows affected: {cursor.rowcount}"
@@ -82,3 +118,19 @@ def query_database(sql: str) -> str:
         return f"SQL Error: {e}"
     finally:
         conn.close()
+
+
+def query_database(sql: str, db_url: Optional[str] = None) -> str:
+    """
+    Execute a SQL query and return results as a formatted table.
+
+    Args:
+        sql:    SQL query to execute.
+        db_url: Optional PostgreSQL connection URL. If provided (or DATABASE_URL is set),
+                connects to PostgreSQL. Otherwise uses the local SQLite sample database.
+    """
+    import os
+    resolved_url = db_url or os.getenv("DATABASE_URL")
+    if resolved_url:
+        return _query_postgres(sql, resolved_url)
+    return _query_sqlite(sql)

@@ -25,11 +25,11 @@ from tools import TOOLS as DOMAIN_TOOLS, TOOL_HANDLERS as DOMAIN_HANDLERS
 
 WORKDIR = Path.cwd()
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
-TOKEN_THRESHOLD = 100000
+TOKEN_THRESHOLD = 150000
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 1. BASE TOOLS — file I/O + bash (from s_full.py base_tools)
+# 1. BASE TOOLS — file I/O + bash 
 # ═══════════════════════════════════════════════════════════════════════
 
 def safe_path(p: str) -> Path:
@@ -85,7 +85,7 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 2. TODO MANAGER (from s_full.py s03)
+# 2. TODO MANAGER
 # ═══════════════════════════════════════════════════════════════════════
 
 class TodoManager:
@@ -131,7 +131,7 @@ class TodoManager:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 3. SKILL LOADER (from s_full.py s05)
+# 3. SKILL LOADER
 # ═══════════════════════════════════════════════════════════════════════
 
 class SkillLoader:
@@ -167,7 +167,7 @@ class SkillLoader:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 4. CONTEXT COMPACTION (from s_full.py s06)
+# 4. CONTEXT COMPACTION 
 # ═══════════════════════════════════════════════════════════════════════
 
 def estimate_tokens(messages: list) -> int:
@@ -208,7 +208,7 @@ def auto_compact(messages: list) -> list:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 5. BACKGROUND MANAGER (from s_full.py s08)
+# 5. BACKGROUND MANAGER 
 # ═══════════════════════════════════════════════════════════════════════
 
 class BackgroundManager:
@@ -322,15 +322,24 @@ Available skills:
 # REACT LOOP
 # ═══════════════════════════════════════════════════════════════════════
 
-def agent_loop(messages: list):
+def agent_loop(messages: list, tools: list = None, handlers: dict = None):
     """
     Core ReAct loop. Runs until the LLM stops calling tools.
+
+    Args:
+        messages:  Conversation history (mutated in-place).
+        tools:     Optional tool schemas list. Defaults to ALL_TOOLS.
+        handlers:  Optional handler dict. Defaults to ALL_HANDLERS.
 
     Before each LLM call:
       - microcompact old tool results
       - auto_compact if context too large
       - drain background task notifications
     """
+    # Use provided tools/handlers or fall back to module-level globals
+    _tools = tools if tools is not None else ALL_TOOLS
+    _handlers = handlers if handlers is not None else ALL_HANDLERS
+
     rounds_without_todo = 0
 
     while True:
@@ -354,7 +363,7 @@ def agent_loop(messages: list):
         # — LLM call —
         response = chat(
             messages=messages, system=SYSTEM,
-            tools=ALL_TOOLS, max_tokens=8000,
+            tools=_tools, max_tokens=8000,
         )
         messages.append({"role": "assistant", "content": response.content})
 
@@ -371,7 +380,7 @@ def agent_loop(messages: list):
             if block.type == "tool_use":
                 if block.name == "compress":
                     manual_compress = True
-                handler = ALL_HANDLERS.get(block.name)
+                handler = _handlers.get(block.name)
                 try:
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
                 except Exception as e:

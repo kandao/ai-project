@@ -5,10 +5,11 @@ Supports Anthropic and OpenAI.  All agent logic calls chat() or stream()
 — never imports anthropic or openai directly.
 
 Env vars:
-    LLM_PROVIDER     "anthropic" (default) or "openai"
-    LLM_MODEL        optional model override
+    LLM_PROVIDER       "anthropic" (default) or "openai"
+    LLM_MODEL          optional model override
     ANTHROPIC_API_KEY / OPENAI_API_KEY
-    ANTHROPIC_BASE_URL   optional (for compatible APIs like MiniMax)
+    ANTHROPIC_BASE_URL optional — override Anthropic endpoint (e.g. MiniMax Anthropic-compatible)
+    OPENAI_BASE_URL    optional — override OpenAI endpoint (e.g. https://api.minimax.io/v1)
 """
 
 import os
@@ -44,7 +45,11 @@ def _get_anthropic():
 def _get_openai():
     global _openai_client
     if _openai_client is None:
-        _openai_client = openai.OpenAI()
+        kwargs = {}
+        base_url = os.getenv("OPENAI_BASE_URL")
+        if base_url:
+            kwargs["base_url"] = base_url
+        _openai_client = openai.OpenAI(**kwargs)
     return _openai_client
 
 
