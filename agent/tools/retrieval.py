@@ -44,7 +44,7 @@ def _get_embedding(query: str) -> list[float]:
     else:  # openai (default)
         import openai
         client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        model = model or "text-embedding-3-small"
+        model = model or "text-embedding-3-small"  # 1536-dim, matches worker default
         result = client.embeddings.create(input=[query], model=model)
         return result.data[0].embedding
 

@@ -1,6 +1,7 @@
-kafka-python
+aiokafka
 sqlalchemy
 asyncpg
+openai
 pgvector
 pdfplumber
 python-docx

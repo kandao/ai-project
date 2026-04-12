@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from config import settings
 from database import create_tables
 from middleware.rate_limit import init_rate_limiter
-from routers import analytics, chat, documents, internal
+from routers import analytics, auth, chat, documents, internal
 from services.kafka_producer import kafka_producer
 
 logging.basicConfig(
@@ -99,6 +99,9 @@ app.add_middleware(
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────
+# Auth routes — no JWT required (these issue the JWT)
+app.include_router(auth.router)
+
 # Public routes — JWT required at the route function level via Depends(get_current_user)
 app.include_router(documents.router)
 app.include_router(chat.router)

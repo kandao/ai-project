@@ -12,6 +12,7 @@ REPL commands:
   q / exit  — quit
 """
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -57,7 +58,7 @@ def cli_mode():
             continue
 
         history.append({"role": "user", "content": query})
-        agent_loop(history)
+        asyncio.run(agent_loop(history))
 
         # Print the final assistant text
         if history:

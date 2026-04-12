@@ -129,8 +129,10 @@ async def list_documents(
     per_page: int = 20,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    rate_limiter: RateLimiter = Depends(get_rate_limiter),
 ) -> dict[str, Any]:
     """Return a paginated list of the current user's documents."""
+    await rate_limiter.check(str(user.id))
     if page < 1:
         page = 1
     if per_page < 1 or per_page > 100:

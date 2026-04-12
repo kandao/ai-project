@@ -25,14 +25,11 @@ def _analyze_csv(file_path: str, query: str = "") -> str:
         info += f"Describe:\n{df.describe().to_string()}"
         if query:
             try:
+                # Use df.eval() — operates on column expressions only, no arbitrary Python
                 result = df.eval(query)
                 info += f"\n\nQuery result:\n{result}"
-            except Exception:
-                try:
-                    result = eval(query, {"df": df, "pd": pd})
-                    info += f"\n\nQuery result:\n{result}"
-                except Exception as e:
-                    info += f"\n\nQuery error: {e}"
+            except Exception as e:
+                info += f"\n\nQuery error: {e}"
         return info[:50000]
     except Exception as e:
         return f"Error: {e}"

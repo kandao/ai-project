@@ -80,12 +80,12 @@ class TokenManager:
         """
         Return the scoped PostgreSQL credentials for *user_id*.
 
-        Fetches the db_role from the users table and builds the credential dict.
-        The db_password is stored in the db_roles table or should be retrieved
-        from the role manager — for now we return a placeholder password field
-        that the agent will use to connect.
+        Fetches the db_role from the users table, resets the role password via
+        DBRoleManager (create_role is idempotent and returns the new password),
+        and builds the credential dict.
         """
         from sqlalchemy import select
+        from services.db_role_manager import db_role_manager
 
         result = await db.execute(
             select(User.db_role).where(User.id == uuid.UUID(user_id))
@@ -100,6 +100,11 @@ class TokenManager:
 
         db_role = row.db_role
 
+        # Reset (or create) the PostgreSQL role and get the fresh password.
+        # create_role() is idempotent: it creates the role if missing, or
+        # resets its password if it already exists.
+        role_creds = await db_role_manager.create_role(user_id)
+
         # Parse connection details from DATABASE_URL
         # DATABASE_URL format: postgresql+asyncpg://user:pass@host:port/dbname
         from urllib.parse import urlparse
@@ -107,7 +112,7 @@ class TokenManager:
 
         return {
             "db_user": db_role,
-            "db_password": db_role,  # Role password managed by DBRoleManager
+            "db_password": role_creds["db_password"],
             "db_host": parsed.hostname or "postgres",
             "db_port": parsed.port or 5432,
             "db_name": parsed.path.lstrip("/") if parsed.path else "docqa",

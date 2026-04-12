@@ -1,0 +1,30 @@
+version: "3.9"
+
+# Real-API overlay — layer on top of docker-compose.test.yml to run E2E tests
+# against real OpenAI embeddings and real Anthropic LLM instead of mocks.
+#
+# Usage:
+#   export OPENAI_API_KEY=sk-...
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml -f docker-compose.real-api.yml up -d --build
+#   pytest tests/e2e/ -m e2e -v
+#
+# Keys are read from shell env — never hardcode them here.
+
+services:
+
+  worker:
+    environment:
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-minimax}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-embo-01}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+
+  agent:
+    environment:
+      LLM_PROVIDER: anthropic
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      EMBEDDING_PROVIDER: openai
+      EMBEDDING_MODEL: text-embedding-3-small
+      OPENAI_API_KEY: ${OPENAI_API_KEY}

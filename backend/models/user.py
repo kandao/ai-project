@@ -26,6 +26,11 @@ class User(Base):
         String(255),
         nullable=True,
     )
+    hashed_password: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="bcrypt-hashed password",
+    )
     db_role: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,

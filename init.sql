@@ -7,11 +7,12 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- for BM25-style text search
 
 -- ── Users ────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email       VARCHAR(255) UNIQUE NOT NULL,
-    name        VARCHAR(255),
-    db_role     VARCHAR(64),              -- PostgreSQL role name assigned on registration
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email            VARCHAR(255) UNIQUE NOT NULL,
+    name             VARCHAR(255),
+    hashed_password  VARCHAR(255) NOT NULL DEFAULT '',
+    db_role          VARCHAR(64),              -- PostgreSQL role name assigned on registration
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);
@@ -74,7 +75,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     user_id     UUID NOT NULL,
     content     TEXT NOT NULL,
     metadata    JSONB DEFAULT '{}',
-    embedding   vector(1024),
+    embedding   vector(1536),
     language    VARCHAR(5) DEFAULT 'en',
     chunk_index INTEGER,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -85,6 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_user_id ON chunks (user_id);
 
 -- IVFFlat index for approximate nearest-neighbour cosine similarity search.
 -- Lists = 100 is a good default for up to ~1 M rows; tune as needed.
+-- Embedding dimension: 1536 (OpenAI text-embedding-3-small).
 CREATE INDEX IF NOT EXISTS idx_chunks_embedding_cosine
     ON chunks
     USING ivfflat (embedding vector_cosine_ops)
@@ -107,7 +109,9 @@ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 
 -- For documents: current_user == role name == "user_{user_id[:8]}"
 -- We store the full UUID in user_id, so we match on the role prefix.
-CREATE POLICY IF NOT EXISTS user_isolation_documents ON documents
+-- DROP ... IF EXISTS makes this script idempotent on re-runs.
+DROP POLICY IF EXISTS user_isolation_documents ON documents;
+CREATE POLICY user_isolation_documents ON documents
     FOR SELECT
     USING (
         user_id IN (
@@ -116,7 +120,8 @@ CREATE POLICY IF NOT EXISTS user_isolation_documents ON documents
     );
 
 -- For chunks: same logic via user_id column
-CREATE POLICY IF NOT EXISTS user_isolation_chunks ON chunks
+DROP POLICY IF EXISTS user_isolation_chunks ON chunks;
+CREATE POLICY user_isolation_chunks ON chunks
     FOR SELECT
     USING (
         user_id IN (

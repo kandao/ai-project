@@ -11,3 +11,4 @@ pydantic-settings
 python-dotenv
 boto3
 aiofiles
+bcrypt

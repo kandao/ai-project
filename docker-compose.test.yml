@@ -1,0 +1,48 @@
+version: "3.9"
+
+# Test overlay — run with:
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+
+services:
+
+  postgres:
+    environment:
+      POSTGRES_DB: docqa_test
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  redis:
+    command: ["redis-server", "--databases", "16"]
+
+  backend:
+    environment:
+      DATABASE_URL: postgresql+asyncpg://docqa:docqa@postgres/docqa_test
+      REDIS_URL: redis://redis:6379/1
+      JWT_SECRET: test-secret-key-for-e2e-testing-only
+      RATE_LIMIT_REQUESTS_PER_MINUTE: "1000"
+      MAX_UPLOAD_SIZE_MB: "10"
+      STORAGE_BACKEND: local
+      STORAGE_LOCAL_PATH: /data/test-uploads
+    volumes:
+      - upload-test-data:/data/test-uploads
+
+  worker:
+    environment:
+      DATABASE_URL: postgresql://docqa:docqa@postgres/docqa_test
+      EMBEDDING_PROVIDER: mock
+      CHUNK_SIZE: "128"
+      CHUNK_OVERLAP: "16"
+    volumes:
+      - upload-test-data:/data/test-uploads
+
+  agent:
+    environment:
+      DATABASE_URL: postgresql://docqa:docqa@postgres/docqa_test
+      REDIS_URL: redis://redis:6379/1
+      BACKEND_INTERNAL_URL: http://backend:8000
+      LLM_PROVIDER: mock
+
+volumes:
+  postgres-test-data:
+  upload-test-data:
